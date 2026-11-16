@@ -731,15 +731,21 @@ class _CatalogScreenState extends State<CatalogScreen> {
                         leading: ClipRRect(
                           borderRadius: BorderRadius.circular(8),
                           child: Image.asset(
-                            categoryImage[p.category] ??
-                                'assets/category_sparepart.png',
+                            p.imageAsset,
                             width: 56,
                             height: 56,
                             fit: BoxFit.cover,
-                            errorBuilder: (_, _, _) => CircleAvatar(
-                              backgroundColor: const Color(0xFF0E6BA8),
-                              foregroundColor: Colors.white,
-                              child: Icon(iconForCategory(p.category)),
+                            errorBuilder: (_, _, _) => Image.asset(
+                              categoryImage[p.category] ??
+                                  'assets/category_sparepart.png',
+                              width: 56,
+                              height: 56,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) => CircleAvatar(
+                                backgroundColor: const Color(0xFF0E6BA8),
+                                foregroundColor: Colors.white,
+                                child: Icon(iconForCategory(p.category)),
+                              ),
                             ),
                           ),
                         ),
@@ -777,10 +783,15 @@ class _ProductImage extends StatelessWidget {
   final String? overrideSource;
   @override
   Widget build(BuildContext context) {
-    final asset = categoryImage[product.category] ??
+    final categoryAsset = categoryImage[product.category] ??
         'assets/category_sparepart.png';
-    final fallback = Image.asset(asset,
-        height: 200, width: double.infinity, fit: BoxFit.cover);
+    // Gambar produk sendiri dulu; bila gagal, gambar kategori; lalu ikon.
+    final fallback = Image.asset(product.imageAsset,
+        height: 200,
+        width: double.infinity,
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => Image.asset(categoryAsset,
+            height: 200, width: double.infinity, fit: BoxFit.cover));
     final override = overrideSource;
     if (override != null && override.isNotEmpty) {
       if (override.startsWith('http')) {

@@ -27,7 +27,11 @@ class Product {
   final String description;
   final List<String> specs;
   final String warranty;
-  final String? imageUrl; // URL foto produk dari Supabase (null = pakai gambar kategori)
+  final String? imageUrl; // URL foto produk dari Supabase (null = pakai gambar produk)
+  // Gambar ilustrasi tiap produk (aset lokal, sesuai nama produk).
+  // Urutan tampil: override admin > imageUrl Supabase > imageAsset ini >
+  // gambar kategori > ikon. File: assets/products/<id>.png
+  String get imageAsset => 'assets/products/$id.png';
 
   factory Product.fromJson(Map<String, dynamic> j) {
     final specsRaw = j['specs'];
