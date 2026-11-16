@@ -16,6 +16,7 @@ class Product {
     this.description = '',
     this.specs = const [],
     this.warranty = '',
+    this.imageUrl,
   });
   final String id;
   final String name;
@@ -26,7 +27,49 @@ class Product {
   final String description;
   final List<String> specs;
   final String warranty;
+  final String? imageUrl; // URL foto produk dari Supabase (null = pakai gambar kategori)
+
+  factory Product.fromJson(Map<String, dynamic> j) {
+    final specsRaw = j['specs'];
+    final specs = specsRaw is List
+        ? specsRaw.map((e) => e.toString()).toList()
+        : <String>[];
+    final priceRaw = j['price'];
+    return Product(
+      id: j['id'] as String? ?? '',
+      name: j['name'] as String? ?? '',
+      category: j['category'] as String? ?? '',
+      price: priceRaw == null ? null : (priceRaw as num).toDouble(),
+      unitNote: j['unit_note'] as String? ?? '',
+      badge: j['badge'] as String? ?? '',
+      description: j['description'] as String? ?? '',
+      specs: specs,
+      warranty: j['warranty'] as String? ?? '',
+      imageUrl: j['image_url'] as String?,
+    );
+  }
 }
+
+// Gambar ilustrasi per kategori (aset lokal). Foto di web tidak dipakai:
+// 18 kartu sparepart di web memakai gambar yang sama (alt "Lampu
+// Sterilisasi UV") bahkan untuk galon/tissue, jadi foto itu salah untuk
+// produknya. Gambar di bawah ini ilustrasi kategori, bukan foto asli produk.
+const Map<String, String> categoryImage = {
+  'Paket Depot': 'assets/category_paket_depot.png',
+  'Mesin RO': 'assets/category_mesin_ro.png',
+  'Sparepart': 'assets/category_sparepart.png',
+  'Pasir & Media': 'assets/category_pasir_media.png',
+};
+const String serviceImage = 'assets/category_jasa.png';
+
+// ---- Supabase (opsional) ----
+// Isi keduanya setelah membuat proyek Supabase baru "anugrah-cahaya"
+// dan menjalankan supabase/acpm_schema.sql di SQL editor-nya.
+// Bila kosong, aplikasi memakai data lokal di bawah ini (offline-first).
+// JANGAN isi dengan URL/key proyek sekolah (school_progress) — data toko
+// harus tinggal di proyeknya sendiri.
+const String supabaseUrl = '';
+const String supabaseAnonKey = '';
 
 const String priceDisclaimer =
     'Harga dapat berubah sewaktu-waktu — konfirmasi via WhatsApp sebelum memesan.';
@@ -234,6 +277,12 @@ class ServiceItem {
   final String id;
   final String name;
   final String description;
+
+  factory ServiceItem.fromJson(Map<String, dynamic> j) => ServiceItem(
+        id: j['id'] as String? ?? '',
+        name: j['name'] as String? ?? '',
+        description: j['description'] as String? ?? '',
+      );
 }
 
 const String serviceNote =

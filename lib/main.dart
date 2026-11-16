@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'data/products.dart';
+import 'services/acpm_supabase.dart';
+import 'services/admin_auth.dart';
 
 void main() => runApp(const AnugrahCahayaApp());
 
@@ -110,7 +112,7 @@ class AnugrahCahayaApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Anugrah Cahaya Putra Mandiri',
+      title: 'ACPM',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -136,17 +138,42 @@ class _HomePageState extends State<HomePage> {
   Map<String, double?> _overrides = {};
   String _waNumber = defaultWaNumber;
   bool _loaded = false;
+  // Katalog aktif: data lokal dulu, ditimpa data Supabase bila tersedia.
+  List<Product> _catalog = products;
+  List<ServiceItem> _serviceList = services;
+  // Mode Admin: MEMORI SAJA, sengaja tidak disimpan ke SharedPreferences.
+  // Tiap aplikasi ditutup lalu dibuka lagi, muncul layar login lagi.
+  bool _isAdmin = false;
+  // Sudah melewati layar sambutan/login? false = tampilkan layar login.
+  bool _entered = false;
+  // Override gambar produk oleh admin: id produk -> aset kategori / URL.
+  Map<String, String> _imageOverrides = {};
 
   @override
   void initState() {
     super.initState();
     _load();
+    _loadRemote();
+  }
+
+  // Muat dari Supabase bila dikonfigurasi; gagal/offline = tetap data lokal.
+  Future<void> _loadRemote() async {
+    final remoteProducts = await fetchRemoteProducts();
+    final remoteServices = await fetchRemoteServices();
+    if (!mounted) return;
+    if (remoteProducts != null || remoteServices != null) {
+      setState(() {
+        if (remoteProducts != null) _catalog = remoteProducts;
+        if (remoteServices != null) _serviceList = remoteServices;
+      });
+    }
   }
 
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
     final cartRaw = prefs.getString('acpm_cart');
     final ovRaw = prefs.getString('acpm_price_overrides');
+    final imgRaw = prefs.getString('acpm_image_overrides');
     final wa = prefs.getString('acpm_wa_number');
     setState(() {
       if (cartRaw != null) {
@@ -162,6 +189,14 @@ class _HomePageState extends State<HomePage> {
           final m = jsonDecode(ovRaw) as Map<String, dynamic>;
           _overrides = {
             for (final e in m.entries) e.key: (e.value as num?)?.toDouble(),
+          };
+        } catch (_) {}
+      }
+      if (imgRaw != null) {
+        try {
+          final m = jsonDecode(imgRaw) as Map<String, dynamic>;
+          _imageOverrides = {
+            for (final e in m.entries) e.key: e.value.toString(),
           };
         } catch (_) {}
       }
@@ -181,6 +216,40 @@ class _HomePageState extends State<HomePage> {
     await prefs.setString('acpm_price_overrides', jsonEncode(_overrides));
   }
 
+  Future<void> _saveImageOverrides() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+        'acpm_image_overrides', jsonEncode(_imageOverrides));
+  }
+
+  // Admin: ganti gambar produk. [value] = path aset kategori atau URL gambar.
+  // null = hapus override (kembali ke gambar bawaan / foto Supabase).
+  void _setImageOverride(String productId, String? value) {
+    setState(() {
+      if (value == null || value.trim().isEmpty) {
+        _imageOverrides.remove(productId);
+      } else {
+        _imageOverrides[productId] = value.trim();
+      }
+    });
+    _saveImageOverrides();
+    // Bila override berupa URL dan Supabase terkonfigurasi, kirim juga
+    // ke Supabase (kolom image_url). Override aset lokal tidak dikirim.
+    if (_isAdmin && value != null && value.startsWith('http')) {
+      _syncImageToSupabase(productId, value);
+    }
+  }
+
+  Future<void> _syncImageToSupabase(String productId, String url) async {
+    if (!supabaseConfigured) return;
+    final ok = await updateRemoteImage(productId, url);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Gambar tersimpan di HP ini (gagal kirim ke Supabase — periksa koneksi / login admin Supabase).')));
+    }
+  }
+
   Future<void> _saveWa(String number) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('acpm_wa_number', number);
@@ -191,13 +260,22 @@ class _HomePageState extends State<HomePage> {
 
   String itemName(CartItem item) {
     if (item.kind == 'service') {
+      for (final s in _serviceList) {
+        if (s.id == item.id) return s.name;
+      }
       return findService(item.id)?.name ?? item.id;
+    }
+    for (final p in _catalog) {
+      if (p.id == item.id) return p.name;
     }
     return findProduct(item.id)?.name ?? item.id;
   }
 
   double? itemPrice(CartItem item) {
     if (item.kind == 'service') return null;
+    for (final p in _catalog) {
+      if (p.id == item.id) return effectivePrice(p);
+    }
     final p = findProduct(item.id);
     return p == null ? null : effectivePrice(p);
   }
@@ -239,11 +317,44 @@ class _HomePageState extends State<HomePage> {
   void _setPriceOverride(String productId, double? price) {
     setState(() => _overrides[productId] = price);
     _saveOverrides();
+    // Admin + Supabase terkonfigurasi: kirim juga ke Supabase (best-effort).
+    // Pelanggan tidak pernah sampai ke sini (tombol edit tidak ada).
+    if (_isAdmin) _syncPriceToSupabase(productId, price);
   }
 
   void _resetPriceOverride(String productId) {
     setState(() => _overrides.remove(productId));
     _saveOverrides();
+    if (_isAdmin) {
+      double? base;
+      for (final p in _catalog) {
+        if (p.id == productId) base = p.price;
+      }
+      base ??= findProduct(productId)?.price;
+      _syncPriceToSupabase(productId, base);
+    }
+  }
+
+  Future<void> _syncPriceToSupabase(String productId, double? price) async {
+    if (!supabaseConfigured) return;
+    final ok = await updateRemotePrice(productId, price);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Harga tersimpan di HP ini (gagal kirim ke Supabase — periksa koneksi / login admin Supabase).')));
+    }
+  }
+
+  void _enterAdmin() {
+    showAdminPinDialog(context, onUnlocked: (_) {
+      setState(() => _isAdmin = true);
+    });
+  }
+
+  void _exitAdmin() {
+    setState(() => _isAdmin = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Keluar dari Mode Admin.')));
   }
 
   void _resetAllPrices() {
@@ -261,13 +372,16 @@ class _HomePageState extends State<HomePage> {
       context,
       MaterialPageRoute(
         builder: (_) => SettingsPage(
+          isAdmin: _isAdmin,
           waNumber: _waNumber,
           onWaChanged: _setWaNumber,
           onResetAllPrices: _resetAllPrices,
           overrideCount: _overrides.length,
+          onEnterAdmin: _enterAdmin,
+          onExitAdmin: _exitAdmin,
         ),
       ),
-    );
+    ).then((_) => setState(() {}));
   }
 
   void _openDetail(Product p) {
@@ -278,10 +392,13 @@ class _HomePageState extends State<HomePage> {
           product: p,
           price: effectivePrice(p),
           isOverridden: _overrides.containsKey(p.id),
+          isAdmin: _isAdmin,
+          imageOverride: _imageOverrides[p.id],
           waNumber: _waNumber,
           onAddToCart: () => _addToCart('product', p.id),
           onSetPrice: (v) => _setPriceOverride(p.id, v),
           onResetPrice: () => _resetPriceOverride(p.id),
+          onSetImage: (v) => _setImageOverride(p.id, v),
         ),
       ),
     ).then((_) => setState(() {}));
@@ -289,10 +406,23 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    // Layar sambutan/login: muncul setiap kali aplikasi dibuka.
+    if (!_entered) {
+      return WelcomeScreen(
+        onGuest: () => setState(() {
+          _isAdmin = false;
+          _entered = true;
+        }),
+        onAdminUnlocked: () => setState(() {
+          _isAdmin = true;
+          _entered = true;
+        }),
+      );
+    }
     final cartCount = _cart.fold<int>(0, (a, e) => a + e.qty);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Anugrah Cahaya Putra Mandiri'),
+        title: const Text('ACPM'),
         backgroundColor: const Color(0xFF0E6BA8),
         foregroundColor: Colors.white,
         actions: [
@@ -307,10 +437,12 @@ class _HomePageState extends State<HomePage> {
           ? const Center(child: CircularProgressIndicator())
           : switch (_tab) {
               0 => CatalogScreen(
+                  items: _catalog,
                   onOpenDetail: _openDetail,
                   priceOf: effectivePrice,
                 ),
               1 => ServicesScreen(
+                  items: _serviceList,
                   waNumber: _waNumber,
                   onAddToCart: (id) => _addToCart('service', id),
                 ),
@@ -344,6 +476,151 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
+// ---------------- LAYAR SAMBUTAN / LOGIN ----------------
+// Muncul setiap kali aplikasi dibuka dari kondisi tertutup.
+// Tamu masuk tanpa PIN; admin masuk dengan PIN 4 digit.
+// PIN salah -> "PIN salah, coba lagi", tetap di layar ini.
+class WelcomeScreen extends StatefulWidget {
+  const WelcomeScreen(
+      {super.key, required this.onGuest, required this.onAdminUnlocked});
+  final VoidCallback onGuest;
+  final VoidCallback onAdminUnlocked;
+  @override
+  State<WelcomeScreen> createState() => _WelcomeScreenState();
+}
+
+class _WelcomeScreenState extends State<WelcomeScreen> {
+  final _pin = TextEditingController();
+  String _error = '';
+
+  @override
+  void dispose() {
+    _pin.dispose();
+    super.dispose();
+  }
+
+  void _tryAdminLogin() {
+    if (verifyPin(_pin.text.trim())) {
+      widget.onAdminUnlocked();
+    } else {
+      setState(() => _error = 'PIN salah, coba lagi');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Persis mockup yang disetujui user (17 Nov 01:05 WIB):
+    // logo lengkap di atas, judul ACPM, kartu Login Admin, "atau",
+    // tombol Masuk sebagai Tamu, catatan kecil di bawah kartu.
+    return Scaffold(
+      backgroundColor: Colors.white,
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const SizedBox(height: 40),
+              Image.asset('assets/logo_full.png', height: 150,
+                  fit: BoxFit.contain),
+              const SizedBox(height: 24),
+              const Text('ACPM',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      fontSize: 64,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF0B3D66))),
+              const SizedBox(height: 32),
+              Card(
+                elevation: 4,
+                shadowColor: Colors.black26,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24)),
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text('Login Admin',
+                          style: TextStyle(
+                              fontSize: 28,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF0B3D66))),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _pin,
+                        keyboardType: TextInputType.number,
+                        obscureText: true,
+                        maxLength: 4,
+                        decoration: InputDecoration(
+                          labelText: 'Masukkan PIN Admin',
+                          prefixIcon: const Icon(Icons.lock),
+                          filled: true,
+                          fillColor: Colors.grey.shade100,
+                          border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12)),
+                          counterText: '',
+                        ),
+                        onSubmitted: (_) => _tryAdminLogin(),
+                      ),
+                      if (_error.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Text(_error,
+                            style: const TextStyle(color: Colors.red)),
+                      ],
+                      const SizedBox(height: 16),
+                      FilledButton(
+                        onPressed: _tryAdminLogin,
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF0E6BA8),
+                          padding:
+                              const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16)),
+                        ),
+                        child: const Text('Masuk sebagai Admin',
+                            style: TextStyle(fontSize: 18)),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text('atau',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.grey)),
+                      const SizedBox(height: 16),
+                      OutlinedButton(
+                        onPressed: widget.onGuest,
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFF0E6BA8),
+                          side: const BorderSide(
+                              color: Color(0xFF0E6BA8), width: 1.5),
+                          padding:
+                              const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16)),
+                        ),
+                        child: const Text('Masuk sebagai Tamu',
+                            style: TextStyle(fontSize: 18)),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                'Tamu hanya bisa melihat katalog dan memesan. '
+                'Hanya admin yang bisa ubah harga, ubah gambar, '
+                'dan ubah nomor WhatsApp.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.grey, fontSize: 13),
+              ),
+              const SizedBox(height: 24),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ---------------- KATALOG ----------------
 
 const List<String> categories = [
@@ -356,7 +633,11 @@ const List<String> categories = [
 
 class CatalogScreen extends StatefulWidget {
   const CatalogScreen(
-      {super.key, required this.onOpenDetail, required this.priceOf});
+      {super.key,
+      required this.items,
+      required this.onOpenDetail,
+      required this.priceOf});
+  final List<Product> items;
   final ValueChanged<Product> onOpenDetail;
   final double? Function(Product) priceOf;
   @override
@@ -369,7 +650,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final shown = products.where((p) {
+    final shown = widget.items.where((p) {
       final okCat = _category == 'Semua' || p.category == _category;
       final q = _query.toLowerCase();
       final okQuery = q.isEmpty || p.name.toLowerCase().contains(q);
@@ -379,19 +660,26 @@ class _CatalogScreenState extends State<CatalogScreen> {
       children: [
         Container(
           width: double.infinity,
+          color: Colors.white,
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          child: Image.asset('assets/logo_full.png', height: 84,
+              fit: BoxFit.contain),
+        ),
+        Container(
+          width: double.infinity,
           color: const Color(0xFF0E6BA8),
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
           child: const Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('SPESIALIS DEPOT AIR MINUM',
+              Text('Anugrah Cahaya Putra Mandiri',
                   style: TextStyle(
                       color: Colors.white,
                       fontSize: 18,
                       fontWeight: FontWeight.bold)),
               SizedBox(height: 4),
               Text(
-                  'Katalog produk & paket usaha — sparepart, mesin RO, pasir & media filter.',
+                  'SPESIALIS DEPOT AIR MINUM — katalog produk & paket usaha: sparepart, mesin RO, pasir & media filter.',
                   style: TextStyle(color: Colors.white70)),
             ],
           ),
@@ -440,10 +728,20 @@ class _CatalogScreenState extends State<CatalogScreen> {
                     final price = widget.priceOf(p);
                     return Card(
                       child: ListTile(
-                        leading: CircleAvatar(
-                          backgroundColor: const Color(0xFF0E6BA8),
-                          foregroundColor: Colors.white,
-                          child: Icon(iconForCategory(p.category)),
+                        leading: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.asset(
+                            categoryImage[p.category] ??
+                                'assets/category_sparepart.png',
+                            width: 56,
+                            height: 56,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => CircleAvatar(
+                              backgroundColor: const Color(0xFF0E6BA8),
+                              foregroundColor: Colors.white,
+                              child: Icon(iconForCategory(p.category)),
+                            ),
+                          ),
                         ),
                         title: Text(p.name),
                         subtitle: Text(
@@ -471,24 +769,166 @@ class _CatalogScreenState extends State<CatalogScreen> {
 
 // ---------------- DETAIL PRODUK ----------------
 
+// Gambar produk: override admin dulu, lalu foto Supabase, lalu ilustrasi kategori.
+// [overrideSource] = path aset kategori atau URL gambar (dari admin).
+class _ProductImage extends StatelessWidget {
+  const _ProductImage({required this.product, this.overrideSource});
+  final Product product;
+  final String? overrideSource;
+  @override
+  Widget build(BuildContext context) {
+    final asset = categoryImage[product.category] ??
+        'assets/category_sparepart.png';
+    final fallback = Image.asset(asset,
+        height: 200, width: double.infinity, fit: BoxFit.cover);
+    final override = overrideSource;
+    if (override != null && override.isNotEmpty) {
+      if (override.startsWith('http')) {
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Image.network(override,
+              height: 200,
+              width: double.infinity,
+              fit: BoxFit.cover,
+              errorBuilder: (_, _, _) => fallback),
+        );
+      }
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.asset(override,
+            height: 200,
+            width: double.infinity,
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => fallback),
+      );
+    }
+    final url = product.imageUrl;
+    if (url != null && url.isNotEmpty) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.network(url,
+            height: 200,
+            width: double.infinity,
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => fallback),
+      );
+    }
+    return ClipRRect(borderRadius: BorderRadius.circular(12), child: fallback);
+  }
+}
+
 class ProductDetailPage extends StatelessWidget {
   const ProductDetailPage({
     super.key,
     required this.product,
     required this.price,
     required this.isOverridden,
+    required this.isAdmin,
+    this.imageOverride,
     required this.waNumber,
     required this.onAddToCart,
     required this.onSetPrice,
     required this.onResetPrice,
+    required this.onSetImage,
   });
   final Product product;
   final double? price;
   final bool isOverridden;
+  final bool isAdmin;
+  final String? imageOverride;
   final String waNumber;
   final VoidCallback onAddToCart;
   final ValueChanged<double?> onSetPrice;
   final VoidCallback onResetPrice;
+  final ValueChanged<String?> onSetImage;
+
+  Future<void> _changeImage(BuildContext context) async {
+    final urlCtrl = TextEditingController();
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Ubah Gambar'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Pilih gambar kategori:',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              ...categoryImage.entries.map((e) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Image.asset(e.value,
+                          width: 48, height: 48, fit: BoxFit.cover),
+                    ),
+                    title: Text(e.key),
+                    onTap: () {
+                      onSetImage(e.value);
+                      Navigator.pop(ctx);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('Gambar produk diubah.')));
+                    },
+                  )),
+              const SizedBox(height: 12),
+              const Text('Atau tempel URL gambar:',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: urlCtrl,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(
+                  labelText: 'https://...',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: () {
+                    final v = urlCtrl.text.trim();
+                    if (v.isEmpty || !v.startsWith('http')) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('Tempel URL gambar yang valid.')));
+                      return;
+                    }
+                    onSetImage(v);
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Gambar produk diubah.')));
+                  },
+                  child: const Text('Pakai URL Ini'),
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: TextButton(
+                  onPressed: () {
+                    onSetImage(null);
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text('Gambar dikembalikan ke gambar bawaan.')));
+                  },
+                  child: const Text('Hapus Perubahan Gambar'),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Tutup')),
+        ],
+      ),
+    );
+    urlCtrl.dispose();
+  }
 
   Future<void> _editPrice(BuildContext context) async {
     final ctrl = TextEditingController(
@@ -555,17 +995,21 @@ class ProductDetailPage extends StatelessWidget {
         title: Text(product.name),
         backgroundColor: const Color(0xFF0E6BA8),
         foregroundColor: Colors.white,
+        // Tamu tidak melihat tombol edit sama sekali.
         actions: [
-          IconButton(
-            icon: const Icon(Icons.edit),
-            tooltip: 'Edit Harga',
-            onPressed: () => _editPrice(context),
-          ),
+          if (isAdmin)
+            IconButton(
+              icon: const Icon(Icons.edit),
+              tooltip: 'Edit Harga',
+              onPressed: () => _editPrice(context),
+            ),
         ],
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          _ProductImage(product: product, overrideSource: imageOverride),
+          const SizedBox(height: 12),
           Row(
             children: [
               Chip(label: Text(product.category)),
@@ -626,31 +1070,45 @@ class ProductDetailPage extends StatelessWidget {
               ),
             ),
           ],
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () => _editPrice(context),
-                  icon: const Icon(Icons.edit),
-                  label: const Text('Edit Harga'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (isOverridden)
+          // Hanya admin yang melihat tombol edit harga & gambar.
+          if (isAdmin) ...[
+            const SizedBox(height: 16),
+            Row(
+              children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () {
-                      onResetPrice();
-                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                          content: Text('Harga dikembalikan ke harga web.')));
-                    },
-                    icon: const Icon(Icons.restore),
-                    label: const Text('Reset ke Harga Web'),
+                    onPressed: () => _editPrice(context),
+                    icon: const Icon(Icons.edit),
+                    label: const Text('Edit Harga'),
                   ),
                 ),
-            ],
-          ),
+                const SizedBox(width: 8),
+                if (isOverridden)
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        onResetPrice();
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text(
+                                    'Harga dikembalikan ke harga web.')));
+                      },
+                      icon: const Icon(Icons.restore),
+                      label: const Text('Reset ke Harga Web'),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () => _changeImage(context),
+                icon: const Icon(Icons.image),
+                label: const Text('Ubah Gambar'),
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
           SizedBox(
             width: double.infinity,
@@ -679,7 +1137,11 @@ class ProductDetailPage extends StatelessWidget {
 
 class ServicesScreen extends StatelessWidget {
   const ServicesScreen(
-      {super.key, required this.waNumber, required this.onAddToCart});
+      {super.key,
+      required this.items,
+      required this.waNumber,
+      required this.onAddToCart});
+  final List<ServiceItem> items;
   final String waNumber;
   final ValueChanged<String> onAddToCart;
   @override
@@ -687,12 +1149,18 @@ class ServicesScreen extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Image.asset(serviceImage,
+              height: 160, width: double.infinity, fit: BoxFit.cover),
+        ),
+        const SizedBox(height: 12),
         const Text('Jasa Pemasangan',
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
         const SizedBox(height: 4),
         const Text(serviceNote, style: TextStyle(color: Colors.orange)),
         const SizedBox(height: 12),
-        ...services.map((s) => Card(
+        ...items.map((s) => Card(
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
@@ -910,15 +1378,21 @@ class CartScreen extends StatelessWidget {
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
     super.key,
+    required this.isAdmin,
     required this.waNumber,
     required this.onWaChanged,
     required this.onResetAllPrices,
     required this.overrideCount,
+    required this.onEnterAdmin,
+    required this.onExitAdmin,
   });
+  final bool isAdmin;
   final String waNumber;
   final ValueChanged<String> onWaChanged;
   final VoidCallback onResetAllPrices;
   final int overrideCount;
+  final VoidCallback onEnterAdmin;
+  final VoidCallback onExitAdmin;
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
@@ -944,66 +1418,83 @@ class _SettingsPageState extends State<SettingsPage> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // Tamu: nomor WA hanya tampil, tidak bisa diubah.
+          // Admin: bisa mengubah nomor WA.
           const Text('Nomor WhatsApp Toko',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          TextField(
-            controller: _wa,
-            keyboardType: TextInputType.phone,
-            decoration: const InputDecoration(
-              labelText: 'Nomor WA (format: 628xxx)',
-              border: OutlineInputBorder(),
+          if (!widget.isAdmin) ...[
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.chat, color: Color(0xFF0E6BA8)),
+                title: Text(widget.waNumber,
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: const Text('Hubungi kami di nomor ini'),
+              ),
             ),
-          ),
-          const SizedBox(height: 8),
-          Card(
-            color: Colors.orange.shade50,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(waWarning,
-                  style: TextStyle(color: Colors.orange.shade900)),
+          ] else ...[
+            TextField(
+              controller: _wa,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(
+                labelText: 'Nomor WA (format: 628xxx)',
+                border: OutlineInputBorder(),
+              ),
             ),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton.icon(
-              onPressed: () {
-                final v = _wa.text.trim();
-                if (v.isEmpty) {
+            const SizedBox(height: 8),
+            Card(
+              color: Colors.orange.shade50,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(waWarning,
+                    style: TextStyle(color: Colors.orange.shade900)),
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: () {
+                  final v = _wa.text.trim();
+                  if (v.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text('Nomor WA tidak boleh kosong.')));
+                    return;
+                  }
+                  widget.onWaChanged(v);
                   ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                      content: Text('Nomor WA tidak boleh kosong.')));
-                  return;
-                }
-                widget.onWaChanged(v);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                    content: Text('Nomor WA disimpan di HP ini.')));
-              },
-              icon: const Icon(Icons.save),
-              label: const Text('Simpan Nomor WA'),
+                      content: Text('Nomor WA disimpan di HP ini.')));
+                },
+                icon: const Icon(Icons.save),
+                label: const Text('Simpan Nomor WA'),
+              ),
             ),
-          ),
+          ],
           const SizedBox(height: 24),
           const Text('Harga Produk',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          Text(
-              'Harga bisa diubah pemilik di halaman detail produk (ikon pensil), tanpa rebuild. Saat ini ${widget.overrideCount} produk harganya diubah dari harga web.'),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: () {
-                widget.onResetAllPrices();
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                    content:
-                        Text('Semua harga dikembalikan ke harga web.')));
-                Navigator.pop(context);
-              },
-              icon: const Icon(Icons.restore),
-              label: const Text('Reset Semua Harga ke Harga Web'),
+          const Text(priceDisclaimer),
+          if (widget.isAdmin) ...[
+            const SizedBox(height: 8),
+            Text(
+                'Harga bisa diubah pemilik di halaman detail produk (ikon pensil), tanpa rebuild. Saat ini ${widget.overrideCount} produk harganya diubah dari harga web.'),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  widget.onResetAllPrices();
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                      content:
+                          Text('Semua harga dikembalikan ke harga web.')));
+                  Navigator.pop(context);
+                },
+                icon: const Icon(Icons.restore),
+                label: const Text('Reset Semua Harga ke Harga Web'),
+              ),
             ),
-          ),
+          ],
           const SizedBox(height: 24),
           const Text('Tentang',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
@@ -1012,6 +1503,46 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 8),
           const Text(priceDisclaimer,
               style: TextStyle(color: Colors.grey, fontSize: 12)),
+          const SizedBox(height: 24),
+          const Text('Mode Admin',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          if (widget.isAdmin) ...[
+            const Card(
+              color: Color(0xFFE3F2FD),
+              child: ListTile(
+                leading: Icon(Icons.admin_panel_settings,
+                    color: Color(0xFF0E6BA8)),
+                title: Text('Mode Admin aktif'),
+                subtitle: Text(
+                    'Anda bisa mengubah harga, gambar produk, dan nomor WA. Mode ini berakhir saat aplikasi ditutup.'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  widget.onExitAdmin();
+                  Navigator.pop(context);
+                },
+                icon: const Icon(Icons.logout),
+                label: const Text('Keluar dari Mode Admin'),
+              ),
+            ),
+          ] else ...[
+            const Text(
+                'Anda sedang dalam Mode Tamu. Masuk sebagai Admin untuk mengubah harga, gambar produk, dan nomor WA.'),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: widget.onEnterAdmin,
+                icon: const Icon(Icons.lock),
+                label: const Text('Masuk sebagai Admin'),
+              ),
+            ),
+          ],
         ],
       ),
     );
