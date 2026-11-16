@@ -1020,6 +1020,23 @@ class ProductDetailPage extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         children: [
           _ProductImage(product: product, overrideSource: imageOverride),
+          const SizedBox(height: 8),
+          const Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.info_outline, size: 16, color: Colors.grey),
+              SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  imageDisplayNote,
+                  style: TextStyle(
+                      color: Colors.grey,
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 12),
           Row(
             children: [
@@ -1164,6 +1181,23 @@ class ServicesScreen extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           child: Image.asset(serviceImage,
               height: 160, width: double.infinity, fit: BoxFit.cover),
+        ),
+        const SizedBox(height: 8),
+        const Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.info_outline, size: 16, color: Colors.grey),
+            SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                imageDisplayNote,
+                style: TextStyle(
+                    color: Colors.grey,
+                    fontSize: 12,
+                    fontStyle: FontStyle.italic),
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 12),
         const Text('Jasa Pemasangan',

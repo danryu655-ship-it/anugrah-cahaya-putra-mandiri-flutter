@@ -77,8 +77,14 @@ void main() {
     expect(find.text('Ubah Gambar'), findsNothing);
     expect(find.text('Reset ke Harga Web'), findsNothing);
     expect(find.byIcon(Icons.edit), findsNothing);
-    // Tamu tetap bisa memesan.
+    // Tamu tetap bisa memesan. Tombol WA ada di bawah lipatan halaman
+    // detail (di bawah gambar + catatan display), jadi scroll dulu.
     expect(find.text('Tambah ke Keranjang'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Pesan via WhatsApp'),
+      300,
+    );
+    await tester.pumpAndSettle();
     expect(find.text('Pesan via WhatsApp'), findsOneWidget);
   });
 

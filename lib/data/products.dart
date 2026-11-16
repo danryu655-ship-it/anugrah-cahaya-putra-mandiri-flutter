@@ -78,6 +78,9 @@ const String supabaseAnonKey = '';
 const String priceDisclaimer =
     'Harga dapat berubah sewaktu-waktu — konfirmasi via WhatsApp sebelum memesan.';
 
+const String imageDisplayNote =
+    'Gambar ini hanya display, untuk lebih detailnya bisa hub nomor yang tertera.';
+
 const List<Product> products = [
   // ---- Paket Depot (Hubungi Kami) ----
   Product(
