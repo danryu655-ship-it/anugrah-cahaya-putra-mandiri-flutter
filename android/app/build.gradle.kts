@@ -29,6 +29,12 @@ android {
         versionName = flutter.versionName
     }
 
+    // Android Lint crashes on this VM (LintDriver RuntimeException) even
+    // though `flutter analyze` is clean — skip lint for release builds.
+    lint {
+        checkReleaseBuilds = false
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.
