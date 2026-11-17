@@ -72,8 +72,9 @@ const String serviceImage = 'assets/category_jasa.png';
 // Bila kosong, aplikasi memakai data lokal di bawah ini (offline-first).
 // JANGAN isi dengan URL/key proyek sekolah (school_progress) — data toko
 // harus tinggal di proyeknya sendiri.
-const String supabaseUrl = '';
-const String supabaseAnonKey = '';
+const String supabaseUrl = 'https://ipktwifbornanhrntvlb.supabase.co';
+const String supabaseAnonKey =
+    'sb_publishable_yQKdmQJ5HRM6o0mcP6ravQ_5ShHBcUm';
 
 const String priceDisclaimer =
     'Harga dapat berubah sewaktu-waktu — konfirmasi via WhatsApp sebelum memesan.';
