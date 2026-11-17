@@ -233,21 +233,8 @@ class _HomePageState extends State<HomePage> {
       }
     });
     _saveImageOverrides();
-    // Bila override berupa URL dan Supabase terkonfigurasi, kirim juga
-    // ke Supabase (kolom image_url). Override aset lokal tidak dikirim.
-    if (_isAdmin && value != null && value.startsWith('http')) {
-      _syncImageToSupabase(productId, value);
-    }
-  }
-
-  Future<void> _syncImageToSupabase(String productId, String url) async {
-    if (!supabaseConfigured) return;
-    final ok = await updateRemoteImage(productId, url);
-    if (!ok && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text(
-              'Gambar tersimpan di HP ini (gagal kirim ke Supabase — periksa koneksi / login admin Supabase).')));
-    }
+    // Sengaja tidak dikirim ke Supabase: key di aplikasi itu read-only.
+    // Gambar di Supabase (image_url) diubah pemilik lewat dashboard.
   }
 
   Future<void> _saveWa(String number) async {
@@ -314,35 +301,20 @@ class _HomePageState extends State<HomePage> {
     _saveCart();
   }
 
+  // Harga admin HANYA tersimpan di HP ini (lokal). Sengaja tidak dikirim
+  // ke Supabase: key di aplikasi itu read-only (anon hanya boleh baca),
+  // supaya tamu/pelanggan tidak bisa mengubah harga lewat API.
+  // Harga yang tampil ke semua pelanggan diubah pemilik lewat dashboard
+  // Supabase (login pemilik). Pelanggan tidak pernah sampai ke sini
+  // (tombol edit hanya ada untuk admin).
   void _setPriceOverride(String productId, double? price) {
     setState(() => _overrides[productId] = price);
     _saveOverrides();
-    // Admin + Supabase terkonfigurasi: kirim juga ke Supabase (best-effort).
-    // Pelanggan tidak pernah sampai ke sini (tombol edit tidak ada).
-    if (_isAdmin) _syncPriceToSupabase(productId, price);
   }
 
   void _resetPriceOverride(String productId) {
     setState(() => _overrides.remove(productId));
     _saveOverrides();
-    if (_isAdmin) {
-      double? base;
-      for (final p in _catalog) {
-        if (p.id == productId) base = p.price;
-      }
-      base ??= findProduct(productId)?.price;
-      _syncPriceToSupabase(productId, base);
-    }
-  }
-
-  Future<void> _syncPriceToSupabase(String productId, double? price) async {
-    if (!supabaseConfigured) return;
-    final ok = await updateRemotePrice(productId, price);
-    if (!ok && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text(
-              'Harga tersimpan di HP ini (gagal kirim ke Supabase — periksa koneksi / login admin Supabase).')));
-    }
   }
 
   void _enterAdmin() {
@@ -1524,6 +1496,9 @@ class _SettingsPageState extends State<SettingsPage> {
             const SizedBox(height: 8),
             Text(
                 'Harga bisa diubah pemilik di halaman detail produk (ikon pensil), tanpa rebuild. Saat ini ${widget.overrideCount} produk harganya diubah dari harga web.'),
+            const SizedBox(height: 8),
+            const Text(
+                'Harga yang tampil ke semua pelanggan berasal dari Supabase — ubah lewat dashboard Supabase (login pemilik). Perubahan harga di aplikasi ini hanya berlaku di HP ini, dan tamu tidak bisa mengubah apa pun.'),
             const SizedBox(height: 8),
             SizedBox(
               width: double.infinity,
